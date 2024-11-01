@@ -66,19 +66,46 @@ class LinearDecoder(nn.Module):
         x = self.norm2(self.dropout(self.leakyrelu(self.decoder2(x))))
         x = self.classifier(x)
         return x
+class K_mer_aggregate(nn.Module):
+    def __init__(self,kmers,in_dim,out_dim,dropout=0.2):
+        '''
+        x:  (batch_size, sequence_length, features)
+        return:  (batch_size, sequence_length, features)
+        '''
+        super(K_mer_aggregate, self).__init__()
+        self.dropout=nn.Dropout(dropout)
+        self.convs=[]
+        for i in kmers:
+            print(i)
+            # sequence_length -> sequence_length-i+1
+            self.convs.append(nn.Conv1d(in_dim,out_dim,i,padding=0))
+        self.convs=nn.ModuleList(self.convs)
+        self.activation=nn.ReLU(inplace=True)
+        self.norm=nn.LayerNorm(out_dim)
 
+    def forward(self,x):
+        # 卷积是在最后一个维度上做的
+        # (batch_size, sequence_length, features)->(batch_size, features, sequence_length)
+        x = x.permute(0,2,1)
+        outputs=[]
+        for conv in self.convs:
+            outputs.append(conv(x))
+        outputs=torch.cat(outputs,dim=2)
+        outputs=self.norm(outputs.permute(0,2,1))
+        return outputs
 
 class MyModel(nn.Module):
-    def __init__(self, d_model, dropout, n_class, vocab_size,nlayers,nhead,dim_feedforward):
+    def __init__(self, d_model, dropout, n_class, vocab_size,nlayers,nhead,dim_feedforward,kmers):
         super(MyModel, self).__init__()
         self.embeding = nn.Embedding(vocab_size,d_model)
         self.pos_encoder = PositionalEncoding(d_model)
+        self.kmer_aggregation = K_mer_aggregate(kmers,d_model,d_model)
 
         self.transformer_encoder = []
         for i in range(nlayers):
             self.transformer_encoder.append(TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout))
         self.transformer_encoder= nn.ModuleList(self.transformer_encoder)
-
+        self.norm = nn.LayerNorm(d_model)
         self.decoder = LinearDecoder(d_model+dim_feedforward,dropout,n_class)
 
 
@@ -86,6 +113,10 @@ class MyModel(nn.Module):
         x1 = x1.to(torch.float32)
 
         x2 = self.embeding(x2)
+        x = self.pos_encoder(x)
+        # sequence_length - kmer + 1
+        x2 = self.kmer_aggregation(x2)
+        # (batch_size, sequence_length , features)->(sequence_length, batch_size, features)
         x2 = x2.permute(1,0,2)
 
         attention_weights = []
@@ -95,7 +126,7 @@ class MyModel(nn.Module):
         attention_weights=torch.stack(attention_weights)
 
         # (sequence_length, batch_size, features)->(batch_size, sequence_length, features)
-        x2 = x2.permute(1,0,2)
+        x2 = self.norm(x2).permute(1,0,2)
         x2 = torch.mean(x2, dim=1)
         x = torch.cat((x1, x2), dim=1)
 
